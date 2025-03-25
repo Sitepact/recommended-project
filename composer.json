@@ -74,7 +74,14 @@
     "mautic/theme-showcase": "6.0.0",
     "mautic/theme-simple-text": "6.0.0",
     "mautic/theme-survey": "6.0.0",
-    "mautic/theme-welcome": "6.0.0"
+    "mautic/theme-welcome": "6.0.0",
+    "mautic/theme-chord": "6.0.0",
+    "mautic/theme-capture": "6.0.0",
+    "mautic/theme-formscape": "6.0.0",
+    "mautic/theme-blend": "6.0.0",
+    "mautic/theme-mono": "6.0.0",
+    "mautic/theme-reachout": "6.0.0",
+    "mautic/theme-eclipse": "6.0.0"
   },
   "repositories": [
     {
