@@ -28,8 +28,8 @@
   "require": {
     "composer/installers": "^2.3",
     "mautic/core-composer-scaffold": "4.x-dev",
-    "mautic/core-project-message": "4.x-dev",
     "mautic/core-lib": "7.x-dev",
+    "mautic/core-project-message": "4.x-dev",
     "mautic/grapes-js-builder-bundle": "7.x-dev",
     "mautic/plugin-clearbit": "7.x-dev",
     "mautic/plugin-cloudstorage": "7.x-dev",
@@ -69,6 +69,7 @@
     "mautic/theme-goldstar": "7.x-dev",
     "mautic/theme-make-announcement": "7.x-dev",
     "mautic/theme-mono": "7.x-dev",
+    "mautic/theme-multi-step": "7.x-dev",
     "mautic/theme-neopolitan": "7.x-dev",
     "mautic/theme-oxygen": "7.x-dev",
     "mautic/theme-paprika": "7.x-dev",
