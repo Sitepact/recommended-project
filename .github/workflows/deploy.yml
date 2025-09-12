@@ -1,0 +1,80 @@
+name: Build & Deploy Mautic
+on:
+  push: { branches: [ main ] }
+  workflow_dispatch: {}
+
+env:
+  NPM_DIR: docroot
+
+jobs:
+  build-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup PHP 8.3
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          tools: composer:v2
+          extensions: intl, mbstring, curl, zip
+
+      - name: Composer install (no dev)
+        run: composer install --no-interaction --no-progress --prefer-dist --no-dev
+
+      - name: Setup Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: ${{ env.NPM_DIR }}/package-lock.json
+
+      - name: Build frontend assets
+        working-directory: ${{ env.NPM_DIR }}
+        env:
+          NODE_OPTIONS: --max-old-space-size=4096
+        run: |
+          npm ci --no-audit --prefer-offline
+          npm run build
+
+      - name: Make deploy bundle
+        run: |
+          mkdir -p artifact
+          rsync -a \
+            --exclude ".git" \
+            --exclude ".github" \
+            --exclude "node_modules" \
+            --exclude "docroot/node_modules" \
+            --exclude "var/*" \
+            --exclude "docroot/var/*" \
+            --exclude "docroot/media/*" \
+            --exclude "config/local.php" \
+            ./ artifact/
+
+      - name: Upload to server (rsync)
+        uses: burnett01/rsync-deployments@7.0.1
+        with:
+          switches: -az --delete
+          path: artifact/
+          remote_path: ${{ secrets.REMOTE_PATH }}/
+          remote_host: ${{ secrets.SSH_HOST }}
+          remote_user: ${{ secrets.SSH_USER }}
+          remote_key: ${{ secrets.SSH_KEY }}
+          remote_port: ${{ secrets.SSH_PORT }}
+
+      - name: Finalize on server
+        uses: appleboy/ssh-action@v1.2.2
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          username: ${{ secrets.SSH_USER }}
+          key: ${{ secrets.SSH_KEY }}
+          port: ${{ secrets.SSH_PORT }}
+          script: |
+            set -e
+            cd "${{ secrets.REMOTE_PATH }}"
+            # Make sure persistent dirs exist (first run)
+            mkdir -p config docroot/media var
+            # Warm cache & run migrations
+            ${{ secrets.PHP_CLI }} bin/console cache:clear --env=prod || true
+            ${{ secrets.PHP_CLI }} bin/console doctrine:migrations:migrate --no-interaction || true
+            ${{ secrets.PHP_CLI }} bin/console cache:clear --env=prod || true
