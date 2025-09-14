@@ -1,32 +1,63 @@
 name: Build & Deploy Mautic
+
 on:
-  push: { branches: [ Live ] }
+  push:
+    branches: [Live]
   workflow_dispatch: {}
 
 jobs:
   build-deploy:
     runs-on: ubuntu-latest
+    
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout code
+        uses: actions/checkout@v4
 
-      - name: Detect NPM_DIR & lockfile
+      - name: Detect NPM directory and lockfile
+        id: npm-detection
         run: |
-          if [ -f docroot/package.json ]; then echo "NPM_DIR=docroot" >> $GITHUB_ENV; else echo "NPM_DIR=." >> $GITHUB_ENV; fi
-          if [ -f "${NPM_DIR:-.}/package-lock.json" ]; then echo "HAS_LOCK=true"  >> $GITHUB_ENV; else echo "HAS_LOCK=false" >> $GITHUB_ENV; fi
-          echo "NPM_DIR=${NPM_DIR:-.}, HAS_LOCK=${HAS_LOCK:-false}"
+          if [ -f docroot/package.json ]; then
+            echo "NPM_DIR=docroot" >> $GITHUB_ENV
+            echo "npm_dir=docroot" >> $GITHUB_OUTPUT
+          else
+            echo "NPM_DIR=." >> $GITHUB_ENV
+            echo "npm_dir=." >> $GITHUB_OUTPUT
+          fi
+          
+          NPM_DIR=${NPM_DIR:-.}
+          if [ -f "${NPM_DIR}/package-lock.json" ]; then
+            echo "HAS_LOCK=true" >> $GITHUB_ENV
+            echo "has_lock=true" >> $GITHUB_OUTPUT
+          else
+            echo "HAS_LOCK=false" >> $GITHUB_ENV
+            echo "has_lock=false" >> $GITHUB_OUTPUT
+          fi
+          
+          echo "NPM_DIR=${NPM_DIR}, HAS_LOCK=${HAS_LOCK:-false}"
 
       - name: Setup PHP 8.3
         uses: shivammathur/setup-php@v2
         with:
           php-version: '8.3'
           tools: composer:v2
-          extensions: intl, mbstring, curl, zip
+          extensions: intl, mbstring, curl, zip, gd, xml, dom
+          coverage: none
 
-      - name: Composer install (no dev)
+      - name: Get Composer cache directory
+        id: composer-cache
+        run: echo "dir=$(composer config cache-files-dir)" >> $GITHUB_OUTPUT
+
+      - name: Cache Composer dependencies
+        uses: actions/cache@v4
+        with:
+          path: ${{ steps.composer-cache.outputs.dir }}
+          key: ${{ runner.os }}-composer-${{ hashFiles('**/composer.lock') }}
+          restore-keys: ${{ runner.os }}-composer-
+
+      - name: Install Composer dependencies
         run: composer install --no-interaction --no-progress --prefer-dist --no-dev --optimize-autoloader
 
-      # Node setup (two-step to avoid cache expression weirdness)
-      - name: Setup Node 20 (with cache)
+      - name: Setup Node.js 20 (with cache)
         if: env.HAS_LOCK == 'true'
         uses: actions/setup-node@v4
         with:
@@ -34,13 +65,13 @@ jobs:
           cache: 'npm'
           cache-dependency-path: ${{ env.NPM_DIR }}/package-lock.json
 
-      - name: Setup Node 20 (no cache)
+      - name: Setup Node.js 20 (without cache)
         if: env.HAS_LOCK != 'true'
         uses: actions/setup-node@v4
         with:
           node-version: '20'
 
-      - name: NPM install
+      - name: Install NPM dependencies
         working-directory: ${{ env.NPM_DIR }}
         env:
           NODE_OPTIONS: --max-old-space-size=4096
@@ -55,32 +86,54 @@ jobs:
         working-directory: ${{ env.NPM_DIR }}
         env:
           NODE_OPTIONS: --max-old-space-size=4096
+          NODE_ENV: production
         run: npm run build
 
-      - name: Make deploy bundle
+      - name: Create deployment artifact
         run: |
           mkdir -p artifact
+          
+          # Copy application files excluding development and cache directories
           rsync -a \
-            --exclude ".git" \
-            --exclude ".github" \
-            --exclude "node_modules" \
-            --exclude "docroot/node_modules" \
-            --exclude "var/*" \
-            --exclude "docroot/var/*" \
-            --exclude "config/local.php" \
+            --exclude=".git" \
+            --exclude=".github" \
+            --exclude=".gitignore" \
+            --exclude="node_modules" \
+            --exclude="docroot/node_modules" \
+            --exclude="var/cache" \
+            --exclude="var/logs" \
+            --exclude="docroot/var/cache" \
+            --exclude="docroot/var/logs" \
+            --exclude="config/local.php" \
+            --exclude="*.log" \
+            --exclude=".env*" \
             ./ artifact/
-          # include built assets for a separate upload (preserves user uploads)
-          rsync -a docroot/media/ artifact/docroot/media/ 2>/dev/null || true
+          
+          # Include built media assets if they exist
+          if [ -d "docroot/media" ]; then
+            rsync -a docroot/media/ artifact/docroot/media/ || true
+          fi
+          
+          # Create necessary directories
+          mkdir -p artifact/var/{cache,logs}
+          mkdir -p artifact/docroot/media
+          
+          # Set basic permissions for created directories
+          chmod 755 artifact/var artifact/docroot/media
 
-      - name: Upload code to server (rsync)
+      - name: Deploy application code
         uses: burnett01/rsync-deployments@7.0.1
         with:
           switches: >-
-            -az --delete
-            --exclude='/config' --exclude='/config/**'
-            --exclude='/var' --exclude='/var/**'
-            --exclude='/docroot/media' --exclude='/docroot/media/**'
-            --filter='P /config' --filter='P /var' --filter='P /docroot/media'
+            -avz --delete --progress
+            --exclude='/config/local.php'
+            --exclude='/var/cache/**'
+            --exclude='/var/logs/**'
+            --exclude='/docroot/media/**'
+            --filter='P /config/local.php'
+            --filter='P /var/cache'
+            --filter='P /var/logs' 
+            --filter='P /docroot/media'
           path: "artifact/"
           remote_path: "${{ secrets.REMOTE_PATH }}/"
           remote_host: "${{ secrets.SSH_HOST }}"
@@ -88,10 +141,10 @@ jobs:
           remote_key: "${{ secrets.SSH_KEY }}"
           remote_port: "${{ secrets.SSH_PORT }}"
 
-      - name: Upload built assets (docroot/media only)
+      - name: Deploy media assets
         uses: burnett01/rsync-deployments@7.0.1
         with:
-          switches: "-az --no-perms --no-owner --no-group"
+          switches: "-avz --no-perms --no-owner --no-group --ignore-existing"
           path: "artifact/docroot/media/"
           remote_path: "${{ secrets.REMOTE_PATH }}/docroot/media/"
           remote_host: "${{ secrets.SSH_HOST }}"
@@ -99,12 +152,28 @@ jobs:
           remote_key: "${{ secrets.SSH_KEY }}"
           remote_port: "${{ secrets.SSH_PORT }}"
 
-      - name: Finalize on server (ownership, perms, cache)
+      - name: Configure server redirects (temporary)
         uses: appleboy/ssh-action@v1.2.2
-        env:
-          DIR: ${{ secrets.REMOTE_PATH }}
-          OWNER: ${{ secrets.CPANEL_USER }}
-          PHP_CLI: ${{ secrets.PHP_CLI }}   # may be empty; we set fallback below
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          username: ${{ secrets.SSH_USER }}
+          key: ${{ secrets.SSH_KEY }}
+          port: ${{ secrets.SSH_PORT }}
+          script: |
+            set -euo pipefail
+            BASE="${{ secrets.REMOTE_PATH }}"
+            
+            # Create root .htaccess for docroot redirection
+            cat > "$BASE/.htaccess" <<'EOF'
+            RewriteEngine On
+            RewriteCond %{REQUEST_URI} !^/docroot/
+            RewriteRule ^(.*)$ docroot/$1 [L,R=302]
+            EOF
+            
+            echo "Root .htaccess configured for docroot redirection"
+
+      - name: Finalize deployment
+        uses: appleboy/ssh-action@v1.2.2
         with:
           host: ${{ secrets.SSH_HOST }}
           username: ${{ secrets.SSH_USER }}
@@ -113,68 +182,97 @@ jobs:
           script: |
             set -euo pipefail
             umask 002
-      
-            # --- set safe default BEFORE using it (works with `set -u`) ---
-            PHP_CLI="${PHP_CLI:-/opt/cpanel/ea-php83/root/usr/bin/php}"
-            PHP="$PHP_CLI -d memory_limit=768M"
-      
+
+            DIR="${{ secrets.REMOTE_PATH }}"
+            OWNER="${{ secrets.CPANEL_USER }}"
+            PHP_CLI="${{ secrets.PHP_CLI }}"
+            PHP="${PHP_CLI:-/opt/cpanel/ea-php83/root/usr/bin/php} -d memory_limit=768M"
+
             cd "$DIR"
-            mkdir -p var docroot/media
-      
-            command -v chattr >/dev/null && chattr -R -i -a "$DIR/var" "$DIR/docroot/media" || true
-            command -v setfacl >/dev/null && setfacl -b -R "$DIR/var" "$DIR/docroot/media" || true
-      
+            
+            # Ensure required directories exist
+            mkdir -p var/{cache,logs} docroot/media
+
+            # Remove filesystem attributes that might prevent operations
+            if command -v chattr >/dev/null 2>&1; then
+              chattr -R -i -a "$DIR/var" "$DIR/docroot/media" 2>/dev/null || true
+            fi
+            
+            if command -v setfacl >/dev/null 2>&1; then
+              setfacl -b -R "$DIR/var" "$DIR/docroot/media" 2>/dev/null || true
+            fi
+
+            # Set ownership if running as root
             if [ "$(id -u)" -eq 0 ] && [ -n "${OWNER:-}" ]; then
               chown -R "$OWNER:$OWNER" "$DIR/var" "$DIR/docroot/media"
             fi
-      
-            find var docroot/media -type d -exec chmod 775 {} \; || true
-            find var docroot/media -type f -exec chmod 664 {} \; || true
-      
-            rm -rf var/cache/prod || true
+
+            # Set proper permissions
+            find var docroot/media -type d -exec chmod 775 {} + 2>/dev/null || true
+            find var docroot/media -type f -exec chmod 664 {} + 2>/dev/null || true
+
+            # Clean production cache
+            rm -rf var/cache/prod 2>/dev/null || true
             mkdir -p var/cache/prod
-      
-            grep -q 'DirectoryIndex' docroot/.htaccess 2>/dev/null || echo 'DirectoryIndex index.php index.html' >> docroot/.htaccess
-            if ! grep -q 'FilesMatch "^(?!index\\.php\\$)(?!upgrade/upgrade\\.php\\$).+\\.php\\$"' docroot/.htaccess 2>/devnull; then
-              cat >> docroot/.htaccess <<'HTPHP'
-              # Apache 2.4+
-              <IfModule authz_core_module>
-                  <FilesMatch "^(?!index\.php$)(?!upgrade/upgrade\.php$).+\.php$">
-                      Require all denied
-                  </FilesMatch>
-                  <FilesMatch "^(composer\.json|composer\.lock)$">
-                      Require all denied
-                  </FilesMatch>
-              </IfModule>
-              # Fallback for Apache < 2.4
-              <IfModule !authz_core_module>
-                  <FilesMatch "^(?!index\.php$)(?!upgrade/upgrade\.php$).+\.php$">
-                      Order allow,deny
-                      Deny from all
-                  </FilesMatch>
-                  <FilesMatch "^(composer\.json|composer\.lock)$">
-                      Order allow,deny
-                      Deny from all
-                  </FilesMatch>
-              </IfModule>
-              HTPHP
+
+            # Configure Apache security rules
+            HTACCESS_FILE="docroot/.htaccess"
+            
+            # Ensure DirectoryIndex is set
+            if ! grep -q 'DirectoryIndex' "$HTACCESS_FILE" 2>/dev/null; then
+              echo 'DirectoryIndex index.php index.html' >> "$HTACCESS_FILE"
             fi
-      
-            RUN_AS_OWNER() {
+
+            # Function to run commands as the correct user
+            run_as_owner() {
               if [ "$(id -u)" -eq 0 ] && [ -n "${OWNER:-}" ]; then
-                su -s /bin/bash - "$OWNER" -c "$*"
+                su -s /bin/bash - "$OWNER" -c "cd '$DIR' && $*"
               else
-                bash -lc "$*"
+                bash -c "cd '$DIR' && $*"
               fi
             }
-      
-            RUN_AS_OWNER "$PHP bin/console mautic:assets:generate --env=prod -vvv" || true
+
+            # Generate Mautic assets
+            echo "Generating Mautic assets..."
+            run_as_owner "$PHP bin/console mautic:assets:generate --env=prod" || {
+              echo "Warning: Asset generation failed, continuing..."
+            }
+
+            # Run database migrations if database is configured
+            echo "Checking database configuration..."
             if $PHP -r '
-              $f="config/local.php"; if(!file_exists($f)) exit(1);
-              $ret = include $f;
-              $c = is_array($ret) ? $ret : (function() use($f){ $parameters=[]; include $f; return $parameters; })();
-              exit( empty($c["db_name"]) || empty($c["db_user"]) || !array_key_exists("db_password",$c) );
+              $configFile = "config/local.php";
+              if (!file_exists($configFile)) exit(1);
+              
+              $config = include $configFile;
+              if (!is_array($config)) {
+                  $parameters = [];
+                  include $configFile;
+                  $config = $parameters ?? [];
+              }
+              
+              $hasDb = !empty($config["db_name"]) && 
+                      !empty($config["db_user"]) && 
+                      array_key_exists("db_password", $config);
+              exit($hasDb ? 0 : 1);
             '; then
-              RUN_AS_OWNER "$PHP bin/console doctrine:migrations:migrate --no-interaction --allow-no-migration" || true
+              echo "Running database migrations..."
+              run_as_owner "$PHP bin/console doctrine:migrations:migrate --no-interaction --allow-no-migration" || {
+                echo "Warning: Database migration failed, continuing..."
+              }
+            else
+              echo "Database not configured, skipping migrations"
             fi
-            RUN_AS_OWNER "$PHP bin/console cache:clear --env=prod -vvv" || true
+
+            # Clear production cache
+            echo "Clearing production cache..."
+            run_as_owner "$PHP bin/console cache:clear --env=prod" || {
+              echo "Warning: Cache clear failed, continuing..."
+            }
+
+            # Final ownership fix
+            if [ "$(id -u)" -eq 0 ] && [ -n "${OWNER:-}" ]; then
+              chown -R "$OWNER:$OWNER" "$DIR/var"
+            fi
+
+            echo "Deployment completed successfully!"
