@@ -363,9 +363,15 @@ jobs:
             fi
 
             # Calculate time for cron job (current time + 1 minute)
-            CURRENT_MINUTE=$(date +%M)
+            # Remove leading zeros to avoid octal interpretation
+            CURRENT_MINUTE=$(date +%M | sed 's/^0*//')
+            CURRENT_HOUR=$(date +%H | sed 's/^0*//')
+            
+            # Handle empty values (when minute/hour is 00)
+            CURRENT_MINUTE=${CURRENT_MINUTE:-0}
+            CURRENT_HOUR=${CURRENT_HOUR:-0}
+            
             NEXT_MINUTE=$(((CURRENT_MINUTE + 1) % 60))
-            CURRENT_HOUR=$(date +%H)
             
             # If we're at minute 59, increment the hour
             if [ $CURRENT_MINUTE -eq 59 ]; then
