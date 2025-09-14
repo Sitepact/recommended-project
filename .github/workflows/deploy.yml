@@ -25,7 +25,7 @@ jobs:
       - name: Composer install (no dev)
         run: composer install --no-interaction --no-progress --prefer-dist --no-dev --optimize-autoloader
 
-      # Node setup (reliable)
+      # Node setup (two steps so we don't rely on odd cache expressions)
       - name: Setup Node 20 (with cache)
         if: env.HAS_LOCK == 'true'
         uses: actions/setup-node@v4
@@ -99,7 +99,7 @@ jobs:
           remote_key: "${{ secrets.SSH_KEY }}"
           remote_port: "${{ secrets.SSH_PORT }}"
 
-      # TEMP: force HTTPS -> /docroot until vhost docroot is fixed
+      # TEMP: force HTTPS -> /docroot until vhost docroot is confirmed right
       - name: Ensure root .htaccess redirects to /docroot (temp)
         uses: appleboy/ssh-action@v1.2.2
         with:
@@ -111,9 +111,9 @@ jobs:
             set -euo pipefail
             BASE="${{ secrets.REMOTE_PATH }}"
             cat > "$BASE/.htaccess" <<'HT'
-              RewriteEngine On
-              RewriteRule ^(.*)$ docroot/$1 [L,R=302]
-              HT
+            RewriteEngine On
+            RewriteRule ^(.*)$ docroot/$1 [L,R=302]
+            HT
 
       - name: Finalize on server (ownership, perms, cache)
         uses: appleboy/ssh-action@v1.2.2
@@ -128,8 +128,9 @@ jobs:
 
             DIR="${{ secrets.REMOTE_PATH }}"
             OWNER="${{ secrets.CPANEL_USER }}"
-            PHP_CLI="${{ secrets.PHP_CLI:-/opt/cpanel/ea-php83/root/usr/bin/php }}"
-            PHP="$PHP_CLI -d memory_limit=768M"
+            # NOTE: no ':-' inside ${{ }}; inject secret, then bash provides fallback:
+            PHP_CLI="${{ secrets.PHP_CLI }}"
+            PHP="${PHP_CLI:-/opt/cpanel/ea-php83/root/usr/bin/php} -d memory_limit=768M"
 
             cd "$DIR"
             mkdir -p var docroot/media
@@ -152,34 +153,34 @@ jobs:
             rm -rf var/cache/prod || true
             mkdir -p var/cache/prod
 
-            # Ensure DirectoryIndex and LSCache off during setup
+            # Ensure DirectoryIndex and LiteSpeed cache off during setup
             grep -q 'DirectoryIndex' docroot/.htaccess 2>/dev/null || echo 'DirectoryIndex index.php index.html' >> docroot/.htaccess
             if ! grep -q 'FilesMatch "^(?!index\\.php\\$)(?!upgrade/upgrade\\.php\\$).+\\.php\\$"' docroot/.htaccess 2>/dev/null; then
               cat >> docroot/.htaccess <<'HTPHP'
-                # Apache 2.4+
-                <IfModule authz_core_module>
-                    <FilesMatch "^(?!index\.php$)(?!upgrade/upgrade\.php$).+\.php$">
-                        Require all denied
-                    </FilesMatch>
-                    <FilesMatch "^(composer\.json|composer\.lock)$">
-                        Require all denied
-                    </FilesMatch>
-                </IfModule>
-                # Fallback for Apache < 2.4
-                <IfModule !authz_core_module>
-                    <FilesMatch "^(?!index\.php$)(?!upgrade/upgrade\.php$).+\.php$">
-                        Order allow,deny
-                        Deny from all
-                    </FilesMatch>
-                    <FilesMatch "^(composer\.json|composer\.lock)$">
-                        Order allow,deny
-                        Deny from all
-                    </FilesMatch>
-                </IfModule>
-                HTPHP
+              # Apache 2.4+
+              <IfModule authz_core_module>
+                  <FilesMatch "^(?!index\.php$)(?!upgrade/upgrade\.php$).+\.php$">
+                      Require all denied
+                  </FilesMatch>
+                  <FilesMatch "^(composer\.json|composer\.lock)$">
+                      Require all denied
+                  </FilesMatch>
+              </IfModule>
+              # Fallback for Apache < 2.4
+              <IfModule !authz_core_module>
+                  <FilesMatch "^(?!index\.php$)(?!upgrade/upgrade\.php$).+\.php$">
+                      Order allow,deny
+                      Deny from all
+                  </FilesMatch>
+                  <FilesMatch "^(composer\.json|composer\.lock)$">
+                      Order allow,deny
+                      Deny from all
+                  </FilesMatch>
+              </IfModule>
+              HTPHP
             fi
 
-            # Helper to run as cPanel user so new files are owned correctly
+            # Run console as the cPanel user so new files are owned correctly
             RUN_AS_OWNER() {
               if [ "$(id -u)" -eq 0 ] && [ -n "${OWNER:-}" ]; then
                 su -s /bin/bash - "$OWNER" -c "$*"
@@ -188,7 +189,7 @@ jobs:
               fi
             }
 
-            # (Assets already uploaded; this is safe to ignore if it warns)
+            # (Assets already uploaded; ignore warnings if any)
             RUN_AS_OWNER "$PHP bin/console mautic:assets:generate --env=prod -vvv" || true
             # Run migrations only if DB creds exist
             if $PHP -r '
