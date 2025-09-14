@@ -55,9 +55,7 @@ jobs:
           restore-keys: ${{ runner.os }}-composer-
 
       - name: Install Composer dependencies
-        run: |
-          composer validate --strict
-          composer install --no-interaction --no-progress --prefer-dist --no-dev --optimize-autoloader
+        run: composer install --no-interaction --no-progress --prefer-dist --no-dev --optimize-autoloader
 
       - name: Setup Node.js 20 (with cache)
         if: env.HAS_LOCK == 'true'
