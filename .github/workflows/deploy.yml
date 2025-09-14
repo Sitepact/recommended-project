@@ -1,0 +1,120 @@
+name: Build & Deploy Mautic
+on:
+  push: { branches: [ Live ] }
+  workflow_dispatch: {}
+
+jobs:
+  build-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Detect where package.json lives and if a lockfile exists
+      - name: Detect NPM_DIR & lockfile
+        run: |
+          if [ -f docroot/package.json ]; then echo "NPM_DIR=docroot" >> $GITHUB_ENV; else echo "NPM_DIR=." >> $GITHUB_ENV; fi
+          if [ -f "${NPM_DIR:-.}/package-lock.json" ]; then echo "HAS_LOCK=true"  >> $GITHUB_ENV; else echo "HAS_LOCK=false" >> $GITHUB_ENV; fi
+          echo "NPM_DIR=${NPM_DIR:-.}, HAS_LOCK=${HAS_LOCK:-false}"
+
+      - name: Setup PHP 8.3
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          tools: composer:v2
+          extensions: intl, mbstring, curl, zip
+
+      - name: Composer install (no dev)
+        run: composer install --no-interaction --no-progress --prefer-dist --no-dev --optimize-autoloader
+
+      # Use cache only if the lockfile exists
+      - name: Setup Node 20 (with cache)
+        if: env.HAS_LOCK == 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: ${{ env.NPM_DIR }}/package-lock.json
+
+      - name: Setup Node 20 (no cache)
+        if: env.HAS_LOCK != 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      # Install deps (ci if lock exists, else install)
+      - name: NPM install
+        working-directory: ${{ env.NPM_DIR }}
+        env:
+          NODE_OPTIONS: --max-old-space-size=4096
+        run: |
+          if [ "${HAS_LOCK}" = "true" ]; then
+            npm ci --no-audit --prefer-offline
+          else
+            npm install --no-audit
+          fi
+
+      - name: Build frontend assets
+        working-directory: ${{ env.NPM_DIR }}
+        env:
+          NODE_OPTIONS: --max-old-space-size=4096
+        run: npm run build
+
+      - name: Make deploy bundle
+        run: |
+          mkdir -p artifact
+          rsync -a \
+            --exclude ".git" \
+            --exclude ".github" \
+            --exclude "node_modules" \
+            --exclude "docroot/node_modules" \
+            --exclude "var/*" \
+            --exclude "docroot/var/*" \
+            --exclude "docroot/media/*" \
+            --exclude "config/local.php" \
+            ./ artifact/
+
+      - name: Upload to server (rsync)
+        uses: burnett01/rsync-deployments@7.0.1
+        with:
+          switches: "-az --delete --exclude='config' --exclude='config/**' --exclude='docroot/media' --exclude='docroot/media/**' --exclude='var' --exclude='var/**' --filter='P config' --filter='P config/**' --filter='P docroot/media' --filter='P docroot/media/**' --filter='P var' --filter='P var/**'"
+          path: "artifact/"
+          remote_path: "${{ secrets.REMOTE_PATH }}/"
+          remote_host: "${{ secrets.SSH_HOST }}"
+          remote_user: "${{ secrets.SSH_USER }}"
+          remote_key: "${{ secrets.SSH_KEY }}"
+          remote_port: "${{ secrets.SSH_PORT }}"
+
+      - name: Finalize on server
+        uses: appleboy/ssh-action@v1.2.2
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          username: ${{ secrets.SSH_USER }}
+          key: ${{ secrets.SSH_KEY }}
+          port: ${{ secrets.SSH_PORT }}
+          script: |
+            set -euo pipefail
+            DIR="${{ secrets.REMOTE_PATH }}"
+            cd "$DIR"
+      
+            mkdir -p config docroot/media var
+            find var docroot/media -type d -exec chmod 775 {} \; || true
+            find var docroot/media -type f -exec chmod 664 {} \; || true
+      
+            # Inject the secret and let bash provide a fallback if it’s empty
+            PHP_CLI="${{ secrets.PHP_CLI }}"
+            PHP="${PHP_CLI:-/opt/cpanel/ea-php83/root/usr/bin/php} -d memory_limit=768M"
+      
+            # Build Mautic assets on the server (since /media is excluded from rsync)
+            $PHP bin/console mautic:assets:generate --env=prod || true
+      
+            # Run migrations if DB creds exist; always clear cache
+            if $PHP -r '
+              $f="config/local.php"; if(!file_exists($f)) exit(1);
+              $ret = include $f;
+              $c = is_array($ret) ? $ret : (function() use($f){ $parameters=[]; include $f; return $parameters; })();
+              exit( empty($c["db_name"]) || empty($c["db_user"]) || !array_key_exists("db_password",$c) );
+            '; then
+              $PHP bin/console doctrine:migrations:migrate --no-interaction --allow-no-migration || true
+            fi
+      
+            $PHP bin/console cache:clear --env=prod || true
