@@ -25,16 +25,25 @@ jobs:
       - name: Composer install (no dev)
         run: composer install --no-interaction --no-progress --prefer-dist --no-dev --optimize-autoloader
 
-      - name: Setup Node 20 (cache if lock)
+      # Node setup (reliable)
+      - name: Setup Node 20 (with cache)
+        if: env.HAS_LOCK == 'true'
         uses: actions/setup-node@v4
         with:
           node-version: '20'
-          cache: ${{ env.HAS_LOCK == 'true' && 'npm' || '' }}
+          cache: 'npm'
           cache-dependency-path: ${{ env.NPM_DIR }}/package-lock.json
+
+      - name: Setup Node 20 (no cache)
+        if: env.HAS_LOCK != 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
 
       - name: NPM install
         working-directory: ${{ env.NPM_DIR }}
-        env: { NODE_OPTIONS: --max-old-space-size=4096 }
+        env:
+          NODE_OPTIONS: --max-old-space-size=4096
         run: |
           if [ "${HAS_LOCK}" = "true" ]; then
             npm ci --no-audit --prefer-offline
@@ -44,7 +53,8 @@ jobs:
 
       - name: Build frontend assets
         working-directory: ${{ env.NPM_DIR }}
-        env: { NODE_OPTIONS: --max-old-space-size=4096 }
+        env:
+          NODE_OPTIONS: --max-old-space-size=4096
         run: npm run build
 
       - name: Make deploy bundle
@@ -101,11 +111,11 @@ jobs:
             set -euo pipefail
             BASE="${{ secrets.REMOTE_PATH }}"
             cat > "$BASE/.htaccess" <<'HT'
-            RewriteEngine On
-            RewriteRule ^(.*)$ docroot/$1 [L,R=302]
-            HT
+RewriteEngine On
+RewriteRule ^(.*)$ docroot/$1 [L,R=302]
+HT
 
-      - name: Finalize on server (fix ownership/perms, clear cache)
+      - name: Finalize on server (ownership, perms, cache)
         uses: appleboy/ssh-action@v1.2.2
         with:
           host: ${{ secrets.SSH_HOST }}
@@ -114,54 +124,79 @@ jobs:
           port: ${{ secrets.SSH_PORT }}
           script: |
             set -euo pipefail
+            umask 002
+
             DIR="${{ secrets.REMOTE_PATH }}"
             OWNER="${{ secrets.CPANEL_USER }}"
-            PHP_CLI="${{ secrets.PHP_CLI }}"
-            PHP="${PHP_CLI:-/opt/cpanel/ea-php83/root/usr/bin/php} -d memory_limit=768M"
+            PHP_CLI="${{ secrets.PHP_CLI:-/opt/cpanel/ea-php83/root/usr/bin/php }}"
+            PHP="$PHP_CLI -d memory_limit=768M"
 
             cd "$DIR"
-
-            # ensure runtime dirs exist
             mkdir -p var docroot/media
 
-            # if we're root, re-own runtime dirs so lsphp (cPanel user) can write
-            if [ "$(id -u)" -eq 0 ] && [ -n "$OWNER" ]; then
-              # clear immutable flags if any (harmless if not present)
-              command -v chattr >/dev/null && chattr -Ri "$DIR/var" "$DIR/docroot/media" || true
+            # Remove immutable/append-only attrs; harmless if absent
+            command -v chattr >/dev/null && chattr -R -i -a "$DIR/var" "$DIR/docroot/media" || true
+            # Drop ACLs if any; harmless if absent
+            command -v setfacl >/dev/null && setfacl -b -R "$DIR/var" "$DIR/docroot/media" || true
+
+            # Re-own runtime dirs to cPanel user if SSH user is root
+            if [ "$(id -u)" -eq 0 ] && [ -n "${OWNER:-}" ]; then
               chown -R "$OWNER:$OWNER" "$DIR/var" "$DIR/docroot/media"
             fi
 
-            # perms: dirs 775, files 664 for writable areas
+            # Writable perms
             find var docroot/media -type d -exec chmod 775 {} \; || true
             find var docroot/media -type f -exec chmod 664 {} \; || true
 
-            # nuke stale prod cache to avoid "Operation not permitted"
+            # Clean prod cache (avoid stale root-owned files)
             rm -rf var/cache/prod || true
+            mkdir -p var/cache/prod
 
-            # optional: add safety lines to docroot/.htaccess
-            if ! grep -q 'DirectoryIndex' docroot/.htaccess 2>/dev/null; then
-              echo 'DirectoryIndex index.php index.html' >> docroot/.htaccess
-            fi
-            if ! grep -q 'CacheDisable' docroot/.htaccess 2>/dev/null; then
-              cat >> docroot/.htaccess <<'EOF'
-                <IfModule LiteSpeed>
-                    CacheDisable public /
-                    CacheDisable private /
+            # Ensure DirectoryIndex and LSCache off during setup
+            grep -q 'DirectoryIndex' docroot/.htaccess 2>/dev/null || echo 'DirectoryIndex index.php index.html' >> docroot/.htaccess
+            if ! grep -q 'FilesMatch "^(?!index\\.php\\$)(?!upgrade/upgrade\\.php\\$).+\\.php\\$"' docroot/.htaccess 2>/dev/null; then
+              cat >> docroot/.htaccess <<'HTPHP'
+                # Apache 2.4+
+                <IfModule authz_core_module>
+                    <FilesMatch "^(?!index\.php$)(?!upgrade/upgrade\.php$).+\.php$">
+                        Require all denied
+                    </FilesMatch>
+                    <FilesMatch "^(composer\.json|composer\.lock)$">
+                        Require all denied
+                    </FilesMatch>
                 </IfModule>
-                EOF
+                # Fallback for Apache < 2.4
+                <IfModule !authz_core_module>
+                    <FilesMatch "^(?!index\.php$)(?!upgrade/upgrade\.php$).+\.php$">
+                        Order allow,deny
+                        Deny from all
+                    </FilesMatch>
+                    <FilesMatch "^(composer\.json|composer\.lock)$">
+                        Order allow,deny
+                        Deny from all
+                    </FilesMatch>
+                </IfModule>
+                HTPHP
             fi
 
-            # try assets (won't matter since we uploaded them; ignore failures)
-            $PHP bin/console mautic:assets:generate --env=prod || true
+            # Helper to run as cPanel user so new files are owned correctly
+            RUN_AS_OWNER() {
+              if [ "$(id -u)" -eq 0 ] && [ -n "${OWNER:-}" ]; then
+                su -s /bin/bash - "$OWNER" -c "$*"
+              else
+                bash -lc "$*"
+              fi
+            }
 
-            # migrations only if DB creds exist
+            # (Assets already uploaded; this is safe to ignore if it warns)
+            RUN_AS_OWNER "$PHP bin/console mautic:assets:generate --env=prod -vvv" || true
+            # Run migrations only if DB creds exist
             if $PHP -r '
               $f="config/local.php"; if(!file_exists($f)) exit(1);
               $ret = include $f;
               $c = is_array($ret) ? $ret : (function() use($f){ $parameters=[]; include $f; return $parameters; })();
               exit( empty($c["db_name"]) || empty($c["db_user"]) || !array_key_exists("db_password",$c) );
             '; then
-              $PHP bin/console doctrine:migrations:migrate --no-interaction --allow-no-migration || true
+              RUN_AS_OWNER "$PHP bin/console doctrine:migrations:migrate --no-interaction --allow-no-migration" || true
             fi
-
-            $PHP bin/console cache:clear --env=prod || true
+            RUN_AS_OWNER "$PHP bin/console cache:clear --env=prod -vvv" || true
