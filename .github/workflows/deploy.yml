@@ -111,9 +111,9 @@ jobs:
             set -euo pipefail
             BASE="${{ secrets.REMOTE_PATH }}"
             cat > "$BASE/.htaccess" <<'HT'
-RewriteEngine On
-RewriteRule ^(.*)$ docroot/$1 [L,R=302]
-HT
+              RewriteEngine On
+              RewriteRule ^(.*)$ docroot/$1 [L,R=302]
+              HT
 
       - name: Finalize on server (ownership, perms, cache)
         uses: appleboy/ssh-action@v1.2.2
