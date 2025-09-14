@@ -152,7 +152,7 @@ jobs:
           remote_key: "${{ secrets.SSH_KEY }}"
           remote_port: "${{ secrets.SSH_PORT }}"
 
-      - name: Configure server redirects and PHP settings
+      - name: Configure server redirects (temporary)
         uses: appleboy/ssh-action@v1.2.2
         with:
           host: ${{ secrets.SSH_HOST }}
@@ -171,26 +171,6 @@ jobs:
             EOF
             
             echo "Root .htaccess configured for docroot redirection"
-            
-            # Configure PHP settings in .user.ini
-            cat > "$BASE/docroot/.user.ini" <<'PHPINI'
-            ; cPanel-generated php ini directives, do not edit
-            ; Manual editing of this file may result in unexpected behavior.
-            ; To make changes to this file, use the cPanel MultiPHP INI Editor (Home >> Software >> MultiPHP INI Editor)
-            ; For more information, read our documentation (https://go.cpanel.net/EA4ModifyINI)
-            display_errors = Off
-            max_execution_time = 120
-            max_input_time = 90
-            max_input_vars = 1000
-            memory_limit = 4096M
-            post_max_size = 32M
-            session.gc_maxlifetime = 1440
-            session.save_path = "/var/cpanel/php/sessions/ea-php83"
-            upload_max_filesize = 32M
-            zlib.output_compression = On
-            PHPINI
-            
-            echo "PHP settings configured in .user.ini"
 
       - name: Finalize deployment
         uses: appleboy/ssh-action@v1.2.2
@@ -235,79 +215,41 @@ jobs:
             rm -rf var/cache/prod 2>/dev/null || true
             mkdir -p var/cache/prod
 
-            # Configure Apache security rules (only manage PHP security section)
+            # Configure Apache security rules
             HTACCESS_FILE="docroot/.htaccess"
             
-            # Ensure DirectoryIndex is set if not present
+            # Ensure DirectoryIndex is set
             if ! grep -q 'DirectoryIndex' "$HTACCESS_FILE" 2>/dev/null; then
               echo 'DirectoryIndex index.php index.html' >> "$HTACCESS_FILE"
             fi
             
-            # Create temporary file to work with
-            TEMP_HTACCESS=$(mktemp)
-            cp "$HTACCESS_FILE" "$TEMP_HTACCESS" 2>/dev/null || touch "$TEMP_HTACCESS"
-            
-            # Remove any existing PHP security blocks (both old and new formats)
-            # This removes blocks between our markers and any duplicate FilesMatch rules
-            sed -i '
-              /^# BEGIN PHP_SECURITY_RULES/,/^# END PHP_SECURITY_RULES/d;
-              /^# Apache 2\.4+$/,/^<\/IfModule>$/ {
-                /FilesMatch.*\.php/,/^<\/IfModule>$/d
-              };
-              /^# Fallback for Apache < 2\.4$/,/^<\/IfModule>$/ {
-                /FilesMatch.*\.php/,/^<\/IfModule>$/d
-              };
-              /^# Security: Deny access to PHP files/,/^<\/IfModule>$/d;
-              /FilesMatch.*index.*upgrade.*php/,/^<\/IfModule>$/d
-            ' "$TEMP_HTACCESS"
-            
-            # Add our clean PHP security rules with clear markers
-            cat >> "$TEMP_HTACCESS" <<'PHP_SECURITY_RULES'
+            # Add PHP security rules if not present
+            if ! grep -q 'FilesMatch.*index\.php.*upgrade\.php' "$HTACCESS_FILE" 2>/dev/null; then
+              cat >> "$HTACCESS_FILE" <<'HTACCESS_RULES'
 
-            # BEGIN PHP_SECURITY_RULES
-            # Security: PHP file access control - managed by deployment workflow
+            # Security: Deny access to PHP files except index.php and upgrade.php
             <IfModule authz_core_module>
-                # Deny access to all PHP files by default
-                <FilesMatch "\.php$">
+                <FilesMatch "^(?!index\.php$)(?!upgrade/upgrade\.php$).+\.php$">
                     Require all denied
                 </FilesMatch>
-                
-                # Allow access only to specific PHP files
-                <FilesMatch "^(index|upgrade/upgrade)\.php$">
-                    Require all granted
-                </FilesMatch>
-                
-                # Deny access to composer files
                 <FilesMatch "^(composer\.json|composer\.lock)$">
                     Require all denied
                 </FilesMatch>
             </IfModule>
-            
+
             # Fallback for Apache < 2.4
             <IfModule !authz_core_module>
-                # Deny access to all PHP files by default
-                <FilesMatch "\.php$">
-                    Order deny,allow
+                <FilesMatch "^(?!index\.php$)(?!upgrade/upgrade\.php$).+\.php$">
+                    Order allow,deny
                     Deny from all
                 </FilesMatch>
-                
-                # Allow access only to specific PHP files
-                <FilesMatch "^(index|upgrade/upgrade)\.php$">
-                    Order allow,deny
-                    Allow from all
-                </FilesMatch>
-                
-                # Deny access to composer files
                 <FilesMatch "^(composer\.json|composer\.lock)$">
-                    Order deny,allow
+                    Order allow,deny
                     Deny from all
                 </FilesMatch>
             </IfModule>
-            # END PHP_SECURITY_RULES
-            PHP_SECURITY_RULES
-            
-            # Replace the original file with our cleaned version
-            mv "$TEMP_HTACCESS" "$HTACCESS_FILE"
+            HTACCESS_RULES
+            fi
 
             # Function to run commands as the correct user
             run_as_owner() {
