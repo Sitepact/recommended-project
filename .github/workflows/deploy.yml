@@ -220,7 +220,22 @@ jobs:
             rm -rf var/cache/prod 2>/dev/null || true
             mkdir -p var/cache/prod
 
-            # Configure Apache security rules
+            # Function to run commands as the correct user
+            run_as_owner() {
+              if [ "$(id -u)" -eq 0 ] && [ -n "${OWNER:-}" ]; then
+                su -s /bin/bash - "$OWNER" -c "cd '$DIR' && $*"
+              else
+                bash -c "cd '$DIR' && $*"
+              fi
+            }
+
+            # Generate Mautic assets
+            echo "Generating Mautic assets..."
+            run_as_owner "$PHP bin/console mautic:assets:generate --env=prod" || {
+              echo "Warning: Asset generation failed, continuing..."
+            }
+
+            # Configure Apache security rules (after Mautic asset generation)
             HTACCESS_FILE="docroot/.htaccess"
             
             # Ensure DirectoryIndex is set
@@ -238,21 +253,6 @@ jobs:
               echo "</IfModule>" >> "$HTACCESS_FILE"
               echo "Added authz_core_module configuration to .htaccess"
             fi
-
-            # Function to run commands as the correct user
-            run_as_owner() {
-              if [ "$(id -u)" -eq 0 ] && [ -n "${OWNER:-}" ]; then
-                su -s /bin/bash - "$OWNER" -c "cd '$DIR' && $*"
-              else
-                bash -c "cd '$DIR' && $*"
-              fi
-            }
-
-            # Generate Mautic assets
-            echo "Generating Mautic assets..."
-            run_as_owner "$PHP bin/console mautic:assets:generate --env=prod" || {
-              echo "Warning: Asset generation failed, continuing..."
-            }
 
             # Run database migrations if database is configured
             echo "Checking database configuration..."
