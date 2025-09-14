@@ -71,6 +71,11 @@ jobs:
         with:
           node-version: '20'
 
+      - name: Create .env file
+        run: |
+          echo "NODE_ENV=production" > ${{ env.NPM_DIR }}/.env
+          echo "Created .env file in ${{ env.NPM_DIR }}"
+
       - name: Install NPM dependencies
         working-directory: ${{ env.NPM_DIR }}
         env:
@@ -169,27 +174,7 @@ jobs:
             RewriteCond %{REQUEST_URI} !^/docroot/
             RewriteRule ^(.*)$ docroot/$1 [L,R=302]
             EOF
-            
-            # Use sed to replace the entire <IfModule> block.
-            sed -i -e '/<IfModule authz_core_module>/,/<\/IfModule>/c\
-            <IfModule authz_core_module>\
-                # Explicitly grant access to specific PHP files.\
-                <FilesMatch "^(index|upgrade/upgrade)\\.php$">\
-                    Require all granted\
-                </FilesMatch>\
-            \
-                # Deny access via HTTP requests to all other PHP files.\
-                <FilesMatch "\\.php$">\
-                    Require all denied\
-                </FilesMatch>\
-            \
-                # Deny access via HTTP requests to composer files.\
-                <FilesMatch "^(composer\\.json|composer\\.lock)$">\
-                    Require all denied\
-                </FilesMatch>\
-            </IfModule>' "$BASE/.htaccess"
-
-            
+                        
             echo "Root .htaccess configured for docroot redirection"
 
       - name: Finalize deployment
@@ -241,6 +226,19 @@ jobs:
             # Ensure DirectoryIndex is set
             if ! grep -q 'DirectoryIndex' "$HTACCESS_FILE" 2>/dev/null; then
               echo 'DirectoryIndex index.php index.html' >> "$HTACCESS_FILE"
+            fi
+
+            # Add authz_core_module configuration if not already present
+            if ! grep -q '<IfModule authz_core_module>' "$HTACCESS_FILE" 2>/dev/null; then
+              cat >> "$HTACCESS_FILE" <<'EOF'
+
+              <IfModule authz_core_module>
+                  <FilesMatch "^(index|upgrade/upgrade)\.php$">
+                      Require all granted
+                  </FilesMatch>
+              </IfModule>
+              EOF
+              echo "Added authz_core_module configuration to .htaccess"
             fi
 
             # Function to run commands as the correct user
