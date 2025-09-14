@@ -76,7 +76,12 @@ jobs:
       - name: Upload to server (rsync)
         uses: burnett01/rsync-deployments@7.0.1
         with:
-          switches: "-az --delete --exclude='config' --exclude='config/**' --exclude='docroot/media' --exclude='docroot/media/**' --exclude='var' --exclude='var/**' --filter='P config' --filter='P config/**' --filter='P docroot/media' --filter='P docroot/media/**' --filter='P var' --filter='P var/**'"
+          switches: >-
+            -az --delete
+            --exclude='/config' --exclude='/config/**'
+            --exclude='/var' --exclude='/var/**'
+            --exclude='/docroot/media' --exclude='/docroot/media/**'
+            --filter='P /config' --filter='P /var' --filter='P /docroot/media'
           path: "artifact/"
           remote_path: "${{ secrets.REMOTE_PATH }}/"
           remote_host: "${{ secrets.SSH_HOST }}"
