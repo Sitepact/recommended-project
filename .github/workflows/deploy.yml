@@ -243,8 +243,8 @@ jobs:
               echo 'DirectoryIndex index.php index.html' >> "$HTACCESS_FILE"
             fi
 
-            # Create a delayed .htaccess configuration script
-            SCRIPT_PATH="$DIR/configure_htaccess.sh"
+            # Create a delayed .htaccess configuration script in /tmp (safe location)
+            SCRIPT_PATH="/tmp/configure_htaccess_$(date +%s).sh"
             echo "Creating script at: $SCRIPT_PATH"
             
             # Create the bash script
@@ -255,9 +255,9 @@ jobs:
             # Log start
             echo "$(date): Script started" >> /tmp/htaccess_config.log
             
-            # Get the directory where this script is located
-            SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-            cd "$SCRIPT_DIR"
+            # The project directory passed as argument
+            PROJECT_DIR="$1"
+            cd "$PROJECT_DIR"
             
             HTACCESS_FILE="docroot/.htaccess"
             
@@ -286,7 +286,7 @@ jobs:
             
             # Remove the cron job
             echo "$(date): Removing cron job..." >> /tmp/htaccess_config.log
-            (crontab -l 2>/dev/null | grep -v "configure_htaccess.sh" | crontab -) 2>/dev/null || true
+            (crontab -l 2>/dev/null | grep -v "configure_htaccess" | crontab -) 2>/dev/null || true
             
             # Remove this script
             echo "$(date): Removing script file..." >> /tmp/htaccess_config.log
@@ -299,16 +299,12 @@ jobs:
             chmod +x "$SCRIPT_PATH"
             echo "Made script executable"
 
-            # Set ownership if running as root
-            if [ "$(id -u)" -eq 0 ] && [ -n "${OWNER:-}" ]; then
-              chown "$OWNER:$OWNER" "$SCRIPT_PATH"
-              echo "Set ownership to $OWNER"
-            fi
-
             # Verify script was created
             if [ -f "$SCRIPT_PATH" ]; then
               echo "Script created successfully at $SCRIPT_PATH"
               ls -la "$SCRIPT_PATH"
+              echo "Script content preview:"
+              head -10 "$SCRIPT_PATH"
             else
               echo "ERROR: Script was not created!"
               exit 1
@@ -326,34 +322,33 @@ jobs:
               NEXT_HOUR=$CURRENT_HOUR
             fi
 
-            # Create cron job to run once at the specific time
-            CRON_LINE="$NEXT_MINUTE $NEXT_HOUR * * * $SCRIPT_PATH"
+            # Create cron job to run once at the specific time, passing project directory as argument
+            CRON_LINE="$NEXT_MINUTE $NEXT_HOUR * * * $SCRIPT_PATH '$DIR'"
             
             echo "Setting up cron job: $CRON_LINE"
             
-            if [ "$(id -u)" -eq 0 ] && [ -n "${OWNER:-}" ]; then
-              # Run as the owner user
-              su -s /bin/bash - "$OWNER" -c "
-                echo 'Current crontab:'
-                crontab -l 2>/dev/null || echo 'No existing crontab'
-                echo 'Adding new cron job...'
-                (crontab -l 2>/dev/null; echo '$CRON_LINE') | crontab -
-                echo 'Updated crontab:'
-                crontab -l
-              "
-            else
-              # Run as current user
+            # Function to setup cron job
+            setup_cron() {
               echo "Current crontab:"
               crontab -l 2>/dev/null || echo "No existing crontab"
               echo "Adding new cron job..."
               (crontab -l 2>/dev/null; echo "$CRON_LINE") | crontab -
               echo "Updated crontab:"
               crontab -l
+            }
+            
+            if [ "$(id -u)" -eq 0 ] && [ -n "${OWNER:-}" ]; then
+              # Run as the owner user
+              su -s /bin/bash - "$OWNER" -c "$(declare -f setup_cron); CRON_LINE='$CRON_LINE'; setup_cron"
+            else
+              # Run as current user
+              setup_cron
             fi
 
             echo "Created delayed .htaccess configuration script and cron job"
             echo "Script will run at $NEXT_HOUR:$NEXT_MINUTE"
             echo "Check /tmp/htaccess_config.log for execution logs"
+            echo "Script location: $SCRIPT_PATH (in /tmp, safe from deployment overwrites)"
 
             # Run database migrations if database is configured
             echo "Checking database configuration..."
