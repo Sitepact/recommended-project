@@ -243,33 +243,69 @@ jobs:
               echo 'DirectoryIndex index.php index.html' >> "$HTACCESS_FILE"
             fi
 
-            # Create a delayed .htaccess configuration script in /tmp (safe location)
-            SCRIPT_PATH="/tmp/configure_htaccess_$(date +%s).sh"
+            # Create tmp directory if it doesn't exist
+            mkdir -p "$HOME/tmp" || mkdir -p "/home/$USER/tmp" || true
+
+            # Create a delayed .htaccess configuration script in home tmp directory
+            SCRIPT_PATH="$HOME/tmp/configure_htaccess_$(date +%s).sh"
+            LOG_PATH="$HOME/tmp/htaccess_config.log"
+            
+            # Fallback paths for different cPanel setups
+            if [ ! -d "$HOME/tmp" ]; then
+              SCRIPT_PATH="/home/$USER/tmp/configure_htaccess_$(date +%s).sh"
+              LOG_PATH="/home/$USER/tmp/htaccess_config.log"
+              mkdir -p "/home/$USER/tmp" || true
+            fi
+            
             echo "Creating script at: $SCRIPT_PATH"
+            echo "Logs will be at: $LOG_PATH"
             
             # Create the bash script
             cat > "$SCRIPT_PATH" << 'SCRIPT_END'
             #!/bin/bash
             set -euo pipefail
             
+            # Set up logging
+            LOG_FILE="$HOME/tmp/htaccess_config.log"
+            if [ ! -d "$HOME/tmp" ]; then
+              LOG_FILE="/home/$USER/tmp/htaccess_config.log"
+              mkdir -p "/home/$USER/tmp" || true
+            fi
+            
             # Log start
-            echo "$(date): Script started" >> /tmp/htaccess_config.log
+            echo "$(date): Script started" >> "$LOG_FILE"
+            echo "$(date): Running as user: $(whoami)" >> "$LOG_FILE"
+            echo "$(date): Home directory: $HOME" >> "$LOG_FILE"
             
             # The project directory passed as argument
             PROJECT_DIR="$1"
+            echo "$(date): Project directory: $PROJECT_DIR" >> "$LOG_FILE"
+            
             cd "$PROJECT_DIR"
             
             HTACCESS_FILE="docroot/.htaccess"
             
             # Wait to ensure all Mautic processes are complete
-            echo "$(date): Waiting 30 seconds..." >> /tmp/htaccess_config.log
+            echo "$(date): Waiting 30 seconds..." >> "$LOG_FILE"
             sleep 30
             
             # Check if .htaccess file exists
             if [ ! -f "$HTACCESS_FILE" ]; then
-                echo "$(date): .htaccess file not found at $HTACCESS_FILE" >> /tmp/htaccess_config.log
+                echo "$(date): .htaccess file not found at $HTACCESS_FILE" >> "$LOG_FILE"
+                echo "$(date): Current directory contents:" >> "$LOG_FILE"
+                ls -la >> "$LOG_FILE" 2>&1
+                if [ -d "docroot" ]; then
+                  echo "$(date): docroot directory contents:" >> "$LOG_FILE"
+                  ls -la docroot/ >> "$LOG_FILE" 2>&1
+                fi
                 exit 1
             fi
+            
+            echo "$(date): Found .htaccess file at $HTACCESS_FILE" >> "$LOG_FILE"
+            
+            # Show current .htaccess content before modification
+            echo "$(date): Current .htaccess content:" >> "$LOG_FILE"
+            cat "$HTACCESS_FILE" >> "$LOG_FILE" 2>&1
             
             # Add authz_core_module configuration if not already present
             if ! grep -q '<IfModule authz_core_module>' "$HTACCESS_FILE" 2>/dev/null; then
@@ -279,32 +315,48 @@ jobs:
                 echo "        Require all granted" >> "$HTACCESS_FILE"
                 echo "    </FilesMatch>" >> "$HTACCESS_FILE"
                 echo "</IfModule>" >> "$HTACCESS_FILE"
-                echo "$(date): Successfully added authz_core_module configuration to .htaccess" >> /tmp/htaccess_config.log
+                echo "$(date): Successfully added authz_core_module configuration to .htaccess" >> "$LOG_FILE"
+                
+                # Show updated .htaccess content
+                echo "$(date): Updated .htaccess content:" >> "$LOG_FILE"
+                cat "$HTACCESS_FILE" >> "$LOG_FILE" 2>&1
             else
-                echo "$(date): authz_core_module configuration already exists in .htaccess" >> /tmp/htaccess_config.log
+                echo "$(date): authz_core_module configuration already exists in .htaccess" >> "$LOG_FILE"
             fi
             
             # Remove the cron job
-            echo "$(date): Removing cron job..." >> /tmp/htaccess_config.log
+            echo "$(date): Removing cron job..." >> "$LOG_FILE"
+            echo "$(date): Current crontab before cleanup:" >> "$LOG_FILE"
+            crontab -l >> "$LOG_FILE" 2>&1 || echo "No crontab found" >> "$LOG_FILE"
+            
             (crontab -l 2>/dev/null | grep -v "configure_htaccess" | crontab -) 2>/dev/null || true
             
+            echo "$(date): Crontab after cleanup:" >> "$LOG_FILE"
+            crontab -l >> "$LOG_FILE" 2>&1 || echo "No crontab found" >> "$LOG_FILE"
+            
             # Remove this script
-            echo "$(date): Removing script file..." >> /tmp/htaccess_config.log
+            echo "$(date): Removing script file: $0" >> "$LOG_FILE"
             rm -f "$0"
             
-            echo "$(date): .htaccess configuration completed and cleanup done" >> /tmp/htaccess_config.log
+            echo "$(date): .htaccess configuration completed and cleanup done" >> "$LOG_FILE"
             SCRIPT_END
 
             # Make the script executable
             chmod +x "$SCRIPT_PATH"
             echo "Made script executable"
 
+            # Set ownership for cPanel user
+            if [ "$(id -u)" -eq 0 ] && [ -n "${OWNER:-}" ]; then
+              chown "$OWNER:$OWNER" "$SCRIPT_PATH"
+              echo "Set ownership to $OWNER"
+            fi
+
             # Verify script was created
             if [ -f "$SCRIPT_PATH" ]; then
               echo "Script created successfully at $SCRIPT_PATH"
               ls -la "$SCRIPT_PATH"
               echo "Script content preview:"
-              head -10 "$SCRIPT_PATH"
+              head -15 "$SCRIPT_PATH"
             else
               echo "ERROR: Script was not created!"
               exit 1
@@ -323,22 +375,22 @@ jobs:
             fi
 
             # Create cron job to run once at the specific time, passing project directory as argument
-            CRON_LINE="$NEXT_MINUTE $NEXT_HOUR * * * $SCRIPT_PATH '$DIR'"
+            CRON_LINE="$NEXT_MINUTE $NEXT_HOUR * * * $SCRIPT_PATH '$DIR' >/dev/null 2>&1"
             
             echo "Setting up cron job: $CRON_LINE"
             
-            # Function to setup cron job
+            # Function to setup cron job for cPanel environment
             setup_cron() {
               echo "Current crontab:"
               crontab -l 2>/dev/null || echo "No existing crontab"
               echo "Adding new cron job..."
               (crontab -l 2>/dev/null; echo "$CRON_LINE") | crontab -
               echo "Updated crontab:"
-              crontab -l
+              crontab -l 2>/dev/null || echo "Failed to read crontab"
             }
             
             if [ "$(id -u)" -eq 0 ] && [ -n "${OWNER:-}" ]; then
-              # Run as the owner user
+              # Run as the cPanel user
               su -s /bin/bash - "$OWNER" -c "$(declare -f setup_cron); CRON_LINE='$CRON_LINE'; setup_cron"
             else
               # Run as current user
@@ -347,8 +399,11 @@ jobs:
 
             echo "Created delayed .htaccess configuration script and cron job"
             echo "Script will run at $NEXT_HOUR:$NEXT_MINUTE"
-            echo "Check /tmp/htaccess_config.log for execution logs"
-            echo "Script location: $SCRIPT_PATH (in /tmp, safe from deployment overwrites)"
+            echo "Check $LOG_PATH for execution logs"
+            echo "Script location: $SCRIPT_PATH"
+            
+            # Create initial log entry
+            echo "$(date): Deployment completed, script scheduled to run at $NEXT_HOUR:$NEXT_MINUTE" >> "$LOG_PATH"
 
             # Run database migrations if database is configured
             echo "Checking database configuration..."
