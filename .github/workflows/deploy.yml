@@ -1,63 +1,32 @@
 name: Build & Deploy Mautic
-
 on:
-  push:
-    branches: [Live]
+  push: { branches: [ Live ] }
   workflow_dispatch: {}
 
 jobs:
   build-deploy:
     runs-on: ubuntu-latest
-    
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Detect NPM directory and lockfile
-        id: npm-detection
+      - name: Detect NPM_DIR & lockfile
         run: |
-          if [ -f docroot/package.json ]; then
-            echo "NPM_DIR=docroot" >> $GITHUB_ENV
-            echo "npm_dir=docroot" >> $GITHUB_OUTPUT
-          else
-            echo "NPM_DIR=." >> $GITHUB_ENV
-            echo "npm_dir=." >> $GITHUB_OUTPUT
-          fi
-          
-          NPM_DIR=${NPM_DIR:-.}
-          if [ -f "${NPM_DIR}/package-lock.json" ]; then
-            echo "HAS_LOCK=true" >> $GITHUB_ENV
-            echo "has_lock=true" >> $GITHUB_OUTPUT
-          else
-            echo "HAS_LOCK=false" >> $GITHUB_ENV
-            echo "has_lock=false" >> $GITHUB_OUTPUT
-          fi
-          
-          echo "NPM_DIR=${NPM_DIR}, HAS_LOCK=${HAS_LOCK:-false}"
+          if [ -f docroot/package.json ]; then echo "NPM_DIR=docroot" >> $GITHUB_ENV; else echo "NPM_DIR=." >> $GITHUB_ENV; fi
+          if [ -f "${NPM_DIR:-.}/package-lock.json" ]; then echo "HAS_LOCK=true"  >> $GITHUB_ENV; else echo "HAS_LOCK=false" >> $GITHUB_ENV; fi
+          echo "NPM_DIR=${NPM_DIR:-.}, HAS_LOCK=${HAS_LOCK:-false}"
 
       - name: Setup PHP 8.3
         uses: shivammathur/setup-php@v2
         with:
           php-version: '8.3'
           tools: composer:v2
-          extensions: intl, mbstring, curl, zip, gd, xml, dom
-          coverage: none
+          extensions: intl, mbstring, curl, zip
 
-      - name: Get Composer cache directory
-        id: composer-cache
-        run: echo "dir=$(composer config cache-files-dir)" >> $GITHUB_OUTPUT
-
-      - name: Cache Composer dependencies
-        uses: actions/cache@v4
-        with:
-          path: ${{ steps.composer-cache.outputs.dir }}
-          key: ${{ runner.os }}-composer-${{ hashFiles('**/composer.lock') }}
-          restore-keys: ${{ runner.os }}-composer-
-
-      - name: Install Composer dependencies
+      - name: Composer install (no dev)
         run: composer install --no-interaction --no-progress --prefer-dist --no-dev --optimize-autoloader
 
-      - name: Setup Node.js 20 (with cache)
+      # Node setup (two-step to avoid cache expression weirdness)
+      - name: Setup Node 20 (with cache)
         if: env.HAS_LOCK == 'true'
         uses: actions/setup-node@v4
         with:
@@ -65,13 +34,13 @@ jobs:
           cache: 'npm'
           cache-dependency-path: ${{ env.NPM_DIR }}/package-lock.json
 
-      - name: Setup Node.js 20 (without cache)
+      - name: Setup Node 20 (no cache)
         if: env.HAS_LOCK != 'true'
         uses: actions/setup-node@v4
         with:
           node-version: '20'
 
-      - name: Install NPM dependencies
+      - name: NPM install
         working-directory: ${{ env.NPM_DIR }}
         env:
           NODE_OPTIONS: --max-old-space-size=4096
@@ -86,54 +55,32 @@ jobs:
         working-directory: ${{ env.NPM_DIR }}
         env:
           NODE_OPTIONS: --max-old-space-size=4096
-          NODE_ENV: production
         run: npm run build
 
-      - name: Create deployment artifact
+      - name: Make deploy bundle
         run: |
           mkdir -p artifact
-          
-          # Copy application files excluding development and cache directories
           rsync -a \
-            --exclude=".git" \
-            --exclude=".github" \
-            --exclude=".gitignore" \
-            --exclude="node_modules" \
-            --exclude="docroot/node_modules" \
-            --exclude="var/cache" \
-            --exclude="var/logs" \
-            --exclude="docroot/var/cache" \
-            --exclude="docroot/var/logs" \
-            --exclude="config/local.php" \
-            --exclude="*.log" \
-            --exclude=".env*" \
+            --exclude ".git" \
+            --exclude ".github" \
+            --exclude "node_modules" \
+            --exclude "docroot/node_modules" \
+            --exclude "var/*" \
+            --exclude "docroot/var/*" \
+            --exclude "config/local.php" \
             ./ artifact/
-          
-          # Include built media assets if they exist
-          if [ -d "docroot/media" ]; then
-            rsync -a docroot/media/ artifact/docroot/media/ || true
-          fi
-          
-          # Create necessary directories
-          mkdir -p artifact/var/{cache,logs}
-          mkdir -p artifact/docroot/media
-          
-          # Set basic permissions for created directories
-          chmod 755 artifact/var artifact/docroot/media
+          # include built assets for a separate upload (preserves user uploads)
+          rsync -a docroot/media/ artifact/docroot/media/ 2>/dev/null || true
 
-      - name: Deploy application code
+      - name: Upload code to server (rsync)
         uses: burnett01/rsync-deployments@7.0.1
         with:
           switches: >-
-            -avz --delete --progress
-            --exclude='/config/local.php'
-            --exclude='/var/cache/**'
-            --exclude='/var/logs/**'
-            --exclude='/docroot/media/**'
-            --filter='P /config/local.php'
-            --filter='P /var/cache'
-            --filter='P /var/logs' 
-            --filter='P /docroot/media'
+            -az --delete
+            --exclude='/config' --exclude='/config/**'
+            --exclude='/var' --exclude='/var/**'
+            --exclude='/docroot/media' --exclude='/docroot/media/**'
+            --filter='P /config' --filter='P /var' --filter='P /docroot/media'
           path: "artifact/"
           remote_path: "${{ secrets.REMOTE_PATH }}/"
           remote_host: "${{ secrets.SSH_HOST }}"
@@ -141,10 +88,10 @@ jobs:
           remote_key: "${{ secrets.SSH_KEY }}"
           remote_port: "${{ secrets.SSH_PORT }}"
 
-      - name: Deploy media assets
+      - name: Upload built assets (docroot/media only)
         uses: burnett01/rsync-deployments@7.0.1
         with:
-          switches: "-avz --no-perms --no-owner --no-group --ignore-existing"
+          switches: "-az --no-perms --no-owner --no-group"
           path: "artifact/docroot/media/"
           remote_path: "${{ secrets.REMOTE_PATH }}/docroot/media/"
           remote_host: "${{ secrets.SSH_HOST }}"
@@ -152,39 +99,12 @@ jobs:
           remote_key: "${{ secrets.SSH_KEY }}"
           remote_port: "${{ secrets.SSH_PORT }}"
 
-      - name: Configure PHP settings
+      - name: Finalize on server (ownership, perms, cache)
         uses: appleboy/ssh-action@v1.2.2
-        with:
-          host: ${{ secrets.SSH_HOST }}
-          username: ${{ secrets.SSH_USER }}
-          key: ${{ secrets.SSH_KEY }}
-          port: ${{ secrets.SSH_PORT }}
-          script: |
-            set -euo pipefail
-            BASE="${{ secrets.REMOTE_PATH }}"
-            
-            # Configure PHP settings in .user.ini (no root redirect)
-            cat > "$BASE/docroot/.user.ini" <<'PHPINI'
-            ; cPanel-generated php ini directives, do not edit
-            ; Manual editing of this file may result in unexpected behavior.
-            ; To make changes to this file, use the cPanel MultiPHP INI Editor (Home >> Software >> MultiPHP INI Editor)
-            ; For more information, read our documentation (https://go.cpanel.net/EA4ModifyINI)
-            display_errors = Off
-            max_execution_time = 120
-            max_input_time = 90
-            max_input_vars = 1000
-            memory_limit = 4096M
-            post_max_size = 32M
-            session.gc_maxlifetime = 1440
-            session.save_path = "/var/cpanel/php/sessions/ea-php83"
-            upload_max_filesize = 32M
-            zlib.output_compression = On
-            PHPINI
-            
-            echo "PHP settings configured in .user.ini"
-
-      - name: Finalize deployment
-        uses: appleboy/ssh-action@v1.2.2
+        env:
+          DIR: ${{ secrets.REMOTE_PATH }}
+          OWNER: ${{ secrets.CPANEL_USER }}
+          PHP_CLI: ${{ secrets.PHP_CLI || '/opt/cpanel/ea-php83/root/usr/bin/php' }}
         with:
           host: ${{ secrets.SSH_HOST }}
           username: ${{ secrets.SSH_USER }}
@@ -194,162 +114,74 @@ jobs:
             set -euo pipefail
             umask 002
 
-            DIR="${{ secrets.REMOTE_PATH }}"
-            OWNER="${{ secrets.CPANEL_USER }}"
-            PHP_CLI="${{ secrets.PHP_CLI }}"
-            PHP="${PHP_CLI:-/opt/cpanel/ea-php83/root/usr/bin/php} -d memory_limit=768M"
+            PHP="$PHP_CLI -d memory_limit=768M"
 
             cd "$DIR"
-            
-            # Ensure required directories exist
-            mkdir -p var/{cache,logs} docroot/media
+            mkdir -p var docroot/media
 
-            # Remove filesystem attributes that might prevent operations
-            if command -v chattr >/dev/null 2>&1; then
-              chattr -R -i -a "$DIR/var" "$DIR/docroot/media" 2>/dev/null || true
-            fi
-            
-            if command -v setfacl >/dev/null 2>&1; then
-              setfacl -b -R "$DIR/var" "$DIR/docroot/media" 2>/dev/null || true
-            fi
+            # Remove immutable/append-only attrs; harmless if absent
+            command -v chattr >/dev/null && chattr -R -i -a "$DIR/var" "$DIR/docroot/media" || true
+            # Drop ACLs if any; harmless if absent
+            command -v setfacl >/dev/null && setfacl -b -R "$DIR/var" "$DIR/docroot/media" || true
 
-            # Set ownership if running as root
+            # Re-own runtime dirs to cPanel user if SSH user is root
             if [ "$(id -u)" -eq 0 ] && [ -n "${OWNER:-}" ]; then
               chown -R "$OWNER:$OWNER" "$DIR/var" "$DIR/docroot/media"
             fi
 
-            # Set proper permissions
-            find var docroot/media -type d -exec chmod 775 {} + 2>/dev/null || true
-            find var docroot/media -type f -exec chmod 664 {} + 2>/dev/null || true
+            # Writable perms
+            find var docroot/media -type d -exec chmod 775 {} \; || true
+            find var docroot/media -type f -exec chmod 664 {} \; || true
 
-            # Clean production cache
-            rm -rf var/cache/prod 2>/dev/null || true
+            # Clean prod cache (avoid stale root-owned files)
+            rm -rf var/cache/prod || true
             mkdir -p var/cache/prod
 
-            # Configure Apache security rules (only manage PHP security section)
-            HTACCESS_FILE="docroot/.htaccess"
-            
-            # Ensure DirectoryIndex is set if not present
-            if ! grep -q 'DirectoryIndex' "$HTACCESS_FILE" 2>/dev/null; then
-              echo 'DirectoryIndex index.php index.html' >> "$HTACCESS_FILE"
+            # Ensure DirectoryIndex and LiteSpeed-safe PHP deny are present
+            grep -q 'DirectoryIndex' docroot/.htaccess 2>/dev/null || echo 'DirectoryIndex index.php index.html' >> docroot/.htaccess
+            if ! grep -q 'FilesMatch "^(?!index\\.php\\$)(?!upgrade/upgrade\\.php\\$).+\\.php\\$"' docroot/.htaccess 2>/dev/null; then
+              cat >> docroot/.htaccess <<'HTPHP'
+              # Apache 2.4+
+              <IfModule authz_core_module>
+                  <FilesMatch "^(?!index\.php$)(?!upgrade/upgrade\.php$).+\.php$">
+                      Require all denied
+                  </FilesMatch>
+                  <FilesMatch "^(composer\.json|composer\.lock)$">
+                      Require all denied
+                  </FilesMatch>
+              </IfModule>
+              # Fallback for Apache < 2.4
+              <IfModule !authz_core_module>
+                  <FilesMatch "^(?!index\.php$)(?!upgrade/upgrade\.php$).+\.php$">
+                      Order allow,deny
+                      Deny from all
+                  </FilesMatch>
+                  <FilesMatch "^(composer\.json|composer\.lock)$">
+                      Order allow,deny
+                      Deny from all
+                  </FilesMatch>
+              </IfModule>
+              HTPHP
             fi
-            
-            # Create temporary file to work with
-            TEMP_HTACCESS=$(mktemp)
-            cp "$HTACCESS_FILE" "$TEMP_HTACCESS" 2>/dev/null || touch "$TEMP_HTACCESS"
-            
-            # Remove any existing PHP security blocks (both old and new formats)
-            # This removes blocks between our markers and any duplicate FilesMatch rules
-            sed -i '
-              /^# BEGIN PHP_SECURITY_RULES/,/^# END PHP_SECURITY_RULES/d;
-              /^# Apache 2\.4+$/,/^<\/IfModule>$/ {
-                /FilesMatch.*\.php/,/^<\/IfModule>$/d
-              };
-              /^# Fallback for Apache < 2\.4$/,/^<\/IfModule>$/ {
-                /FilesMatch.*\.php/,/^<\/IfModule>$/d
-              };
-              /^# Security: Deny access to PHP files/,/^<\/IfModule>$/d;
-              /FilesMatch.*index.*upgrade.*php/,/^<\/IfModule>$/d
-            ' "$TEMP_HTACCESS"
-            
-            # Add our clean PHP security rules with clear markers
-            cat >> "$TEMP_HTACCESS" <<'PHP_SECURITY_RULES'
 
-            # BEGIN PHP_SECURITY_RULES
-            # Security: PHP file access control - managed by deployment workflow
-            <IfModule authz_core_module>
-                # Deny access to all PHP files by default
-                <FilesMatch "\.php$">
-                    Require all denied
-                </FilesMatch>
-                
-                # Allow access only to specific PHP files
-                <FilesMatch "^(index|upgrade/upgrade)\.php$">
-                    Require all granted
-                </FilesMatch>
-                
-                # Deny access to composer files
-                <FilesMatch "^(composer\.json|composer\.lock)$">
-                    Require all denied
-                </FilesMatch>
-            </IfModule>
-            
-            # Fallback for Apache < 2.4
-            <IfModule !authz_core_module>
-                # Deny access to all PHP files by default
-                <FilesMatch "\.php$">
-                    Order deny,allow
-                    Deny from all
-                </FilesMatch>
-                
-                # Allow access only to specific PHP files
-                <FilesMatch "^(index|upgrade/upgrade)\.php$">
-                    Order allow,deny
-                    Allow from all
-                </FilesMatch>
-                
-                # Deny access to composer files
-                <FilesMatch "^(composer\.json|composer\.lock)$">
-                    Order deny,allow
-                    Deny from all
-                </FilesMatch>
-            </IfModule>
-            # END PHP_SECURITY_RULES
-            PHP_SECURITY_RULES
-            
-            # Replace the original file with our cleaned version
-            mv "$TEMP_HTACCESS" "$HTACCESS_FILE"
-
-            # Function to run commands as the correct user
-            run_as_owner() {
+            # Helper to run as cPanel user so new files are owned correctly
+            RUN_AS_OWNER() {
               if [ "$(id -u)" -eq 0 ] && [ -n "${OWNER:-}" ]; then
-                su -s /bin/bash - "$OWNER" -c "cd '$DIR' && $*"
+                su -s /bin/bash - "$OWNER" -c "$*"
               else
-                bash -c "cd '$DIR' && $*"
+                bash -lc "$*"
               fi
             }
 
-            # Generate Mautic assets
-            echo "Generating Mautic assets..."
-            run_as_owner "$PHP bin/console mautic:assets:generate --env=prod" || {
-              echo "Warning: Asset generation failed, continuing..."
-            }
-
-            # Run database migrations if database is configured
-            echo "Checking database configuration..."
+            # (Assets already uploaded; ignore warnings if any)
+            RUN_AS_OWNER "$PHP bin/console mautic:assets:generate --env=prod -vvv" || true
+            # Run migrations only if DB creds exist
             if $PHP -r '
-              $configFile = "config/local.php";
-              if (!file_exists($configFile)) exit(1);
-              
-              $config = include $configFile;
-              if (!is_array($config)) {
-                  $parameters = [];
-                  include $configFile;
-                  $config = $parameters ?? [];
-              }
-              
-              $hasDb = !empty($config["db_name"]) && 
-                      !empty($config["db_user"]) && 
-                      array_key_exists("db_password", $config);
-              exit($hasDb ? 0 : 1);
+              $f="config/local.php"; if(!file_exists($f)) exit(1);
+              $ret = include $f;
+              $c = is_array($ret) ? $ret : (function() use($f){ $parameters=[]; include $f; return $parameters; })();
+              exit( empty($c["db_name"]) || empty($c["db_user"]) || !array_key_exists("db_password",$c) );
             '; then
-              echo "Running database migrations..."
-              run_as_owner "$PHP bin/console doctrine:migrations:migrate --no-interaction --allow-no-migration" || {
-                echo "Warning: Database migration failed, continuing..."
-              }
-            else
-              echo "Database not configured, skipping migrations"
+              RUN_AS_OWNER "$PHP bin/console doctrine:migrations:migrate --no-interaction --allow-no-migration" || true
             fi
-
-            # Clear production cache
-            echo "Clearing production cache..."
-            run_as_owner "$PHP bin/console cache:clear --env=prod" || {
-              echo "Warning: Cache clear failed, continuing..."
-            }
-
-            # Final ownership fix
-            if [ "$(id -u)" -eq 0 ] && [ -n "${OWNER:-}" ]; then
-              chown -R "$OWNER:$OWNER" "$DIR/var"
-            fi
-
-            echo "Deployment completed successfully!"
+            RUN_AS_OWNER "$PHP bin/console cache:clear --env=prod -vvv" || true
