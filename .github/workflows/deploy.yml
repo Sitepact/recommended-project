@@ -69,11 +69,12 @@ jobs:
             --exclude "docroot/node_modules" \
             --exclude "var/*" \
             --exclude "docroot/var/*" \
-            --exclude "docroot/media/*" \
             --exclude "config/local.php" \
             ./ artifact/
+          # Ensure built assets are present in the artifact for the separate upload step
+          rsync -a docroot/media/ artifact/docroot/media/ 2>/dev/null || true
 
-      - name: Upload to server (rsync)
+      - name: Upload code to server (rsync)
         uses: burnett01/rsync-deployments@7.0.1
         with:
           switches: >-
@@ -89,6 +90,33 @@ jobs:
           remote_key: "${{ secrets.SSH_KEY }}"
           remote_port: "${{ secrets.SSH_PORT }}"
 
+      - name: Upload built assets (docroot/media only)
+        uses: burnett01/rsync-deployments@7.0.1
+        with:
+          switches: "-az --no-perms --no-owner --no-group"
+          path: "artifact/docroot/media/"
+          remote_path: "${{ secrets.REMOTE_PATH }}/docroot/media/"
+          remote_host: "${{ secrets.SSH_HOST }}"
+          remote_user: "${{ secrets.SSH_USER }}"
+          remote_key: "${{ secrets.SSH_KEY }}"
+          remote_port: "${{ secrets.SSH_PORT }}"
+
+      # Temporary HTTPS band-aid: route root -> /docroot while you fix the vhost docroot
+      - name: Ensure root .htaccess redirects into /docroot (temp)
+        uses: appleboy/ssh-action@v1.2.2
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          username: ${{ secrets.SSH_USER }}
+          key: ${{ secrets.SSH_KEY }}
+          port: ${{ secrets.SSH_PORT }}
+          script: |
+            set -euo pipefail
+            BASE="${{ secrets.REMOTE_PATH }}"
+            cat > "$BASE/.htaccess" <<'HT'
+            RewriteEngine On
+            RewriteRule ^(.*)$ docroot/$1 [L,R=302]
+            HT
+
       - name: Finalize on server
         uses: appleboy/ssh-action@v1.2.2
         with:
@@ -100,19 +128,20 @@ jobs:
             set -euo pipefail
             DIR="${{ secrets.REMOTE_PATH }}"
             cd "$DIR"
-      
+
+            # Ensure runtime dirs and sane perms
             mkdir -p config docroot/media var
             find var docroot/media -type d -exec chmod 775 {} \; || true
             find var docroot/media -type f -exec chmod 664 {} \; || true
-      
-            # Inject the secret and let bash provide a fallback if it’s empty
+
+            # PHP CLI (with fallback if secret isn't set)
             PHP_CLI="${{ secrets.PHP_CLI }}"
             PHP="${PHP_CLI:-/opt/cpanel/ea-php83/root/usr/bin/php} -d memory_limit=768M"
-      
-            # Build Mautic assets on the server (since /media is excluded from rsync)
+
+            # Optional: try to (re)generate assets; ignore failure if already uploaded
             $PHP bin/console mautic:assets:generate --env=prod || true
-      
-            # Run migrations if DB creds exist; always clear cache
+
+            # Run migrations only if DB creds exist; always clear cache
             if $PHP -r '
               $f="config/local.php"; if(!file_exists($f)) exit(1);
               $ret = include $f;
@@ -121,5 +150,5 @@ jobs:
             '; then
               $PHP bin/console doctrine:migrations:migrate --no-interaction --allow-no-migration || true
             fi
-      
+
             $PHP bin/console cache:clear --env=prod || true
