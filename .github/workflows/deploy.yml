@@ -170,6 +170,26 @@ jobs:
             RewriteRule ^(.*)$ docroot/$1 [L,R=302]
             EOF
             
+            # Use sed to replace the entire <IfModule> block.
+            sed -i -e '/<IfModule authz_core_module>/,/<\/IfModule>/c\
+            <IfModule authz_core_module>\
+                # Explicitly grant access to specific PHP files.\
+                <FilesMatch "^(index|upgrade/upgrade)\\.php$">\
+                    Require all granted\
+                </FilesMatch>\
+            \
+                # Deny access via HTTP requests to all other PHP files.\
+                <FilesMatch "\\.php$">\
+                    Require all denied\
+                </FilesMatch>\
+            \
+                # Deny access via HTTP requests to composer files.\
+                <FilesMatch "^(composer\\.json|composer\\.lock)$">\
+                    Require all denied\
+                </FilesMatch>\
+            </IfModule>' "$BASE/.htaccess"
+
+            
             echo "Root .htaccess configured for docroot redirection"
 
       - name: Finalize deployment
