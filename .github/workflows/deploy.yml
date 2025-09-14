@@ -9,7 +9,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # Detect where package.json lives and if a lockfile exists
       - name: Detect NPM_DIR & lockfile
         run: |
           if [ -f docroot/package.json ]; then echo "NPM_DIR=docroot" >> $GITHUB_ENV; else echo "NPM_DIR=." >> $GITHUB_ENV; fi
@@ -26,26 +25,16 @@ jobs:
       - name: Composer install (no dev)
         run: composer install --no-interaction --no-progress --prefer-dist --no-dev --optimize-autoloader
 
-      # Use cache only if the lockfile exists
-      - name: Setup Node 20 (with cache)
-        if: env.HAS_LOCK == 'true'
+      - name: Setup Node 20 (cache if lock)
         uses: actions/setup-node@v4
         with:
           node-version: '20'
-          cache: 'npm'
+          cache: ${{ env.HAS_LOCK == 'true' && 'npm' || '' }}
           cache-dependency-path: ${{ env.NPM_DIR }}/package-lock.json
 
-      - name: Setup Node 20 (no cache)
-        if: env.HAS_LOCK != 'true'
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-
-      # Install deps (ci if lock exists, else install)
       - name: NPM install
         working-directory: ${{ env.NPM_DIR }}
-        env:
-          NODE_OPTIONS: --max-old-space-size=4096
+        env: { NODE_OPTIONS: --max-old-space-size=4096 }
         run: |
           if [ "${HAS_LOCK}" = "true" ]; then
             npm ci --no-audit --prefer-offline
@@ -55,8 +44,7 @@ jobs:
 
       - name: Build frontend assets
         working-directory: ${{ env.NPM_DIR }}
-        env:
-          NODE_OPTIONS: --max-old-space-size=4096
+        env: { NODE_OPTIONS: --max-old-space-size=4096 }
         run: npm run build
 
       - name: Make deploy bundle
@@ -71,7 +59,7 @@ jobs:
             --exclude "docroot/var/*" \
             --exclude "config/local.php" \
             ./ artifact/
-          # Ensure built assets are present in the artifact for the separate upload step
+          # include built assets for a separate upload (preserves user uploads)
           rsync -a docroot/media/ artifact/docroot/media/ 2>/dev/null || true
 
       - name: Upload code to server (rsync)
@@ -101,8 +89,8 @@ jobs:
           remote_key: "${{ secrets.SSH_KEY }}"
           remote_port: "${{ secrets.SSH_PORT }}"
 
-      # Temporary HTTPS band-aid: route root -> /docroot while you fix the vhost docroot
-      - name: Ensure root .htaccess redirects into /docroot (temp)
+      # TEMP: force HTTPS -> /docroot until vhost docroot is fixed
+      - name: Ensure root .htaccess redirects to /docroot (temp)
         uses: appleboy/ssh-action@v1.2.2
         with:
           host: ${{ secrets.SSH_HOST }}
@@ -117,7 +105,7 @@ jobs:
             RewriteRule ^(.*)$ docroot/$1 [L,R=302]
             HT
 
-      - name: Finalize on server
+      - name: Finalize on server (fix ownership/perms, clear cache)
         uses: appleboy/ssh-action@v1.2.2
         with:
           host: ${{ secrets.SSH_HOST }}
@@ -127,21 +115,46 @@ jobs:
           script: |
             set -euo pipefail
             DIR="${{ secrets.REMOTE_PATH }}"
-            cd "$DIR"
-
-            # Ensure runtime dirs and sane perms
-            mkdir -p config docroot/media var
-            find var docroot/media -type d -exec chmod 775 {} \; || true
-            find var docroot/media -type f -exec chmod 664 {} \; || true
-
-            # PHP CLI (with fallback if secret isn't set)
+            OWNER="${{ secrets.CPANEL_USER }}"
             PHP_CLI="${{ secrets.PHP_CLI }}"
             PHP="${PHP_CLI:-/opt/cpanel/ea-php83/root/usr/bin/php} -d memory_limit=768M"
 
-            # Optional: try to (re)generate assets; ignore failure if already uploaded
+            cd "$DIR"
+
+            # ensure runtime dirs exist
+            mkdir -p var docroot/media
+
+            # if we're root, re-own runtime dirs so lsphp (cPanel user) can write
+            if [ "$(id -u)" -eq 0 ] && [ -n "$OWNER" ]; then
+              # clear immutable flags if any (harmless if not present)
+              command -v chattr >/dev/null && chattr -Ri "$DIR/var" "$DIR/docroot/media" || true
+              chown -R "$OWNER:$OWNER" "$DIR/var" "$DIR/docroot/media"
+            fi
+
+            # perms: dirs 775, files 664 for writable areas
+            find var docroot/media -type d -exec chmod 775 {} \; || true
+            find var docroot/media -type f -exec chmod 664 {} \; || true
+
+            # nuke stale prod cache to avoid "Operation not permitted"
+            rm -rf var/cache/prod || true
+
+            # optional: add safety lines to docroot/.htaccess
+            if ! grep -q 'DirectoryIndex' docroot/.htaccess 2>/dev/null; then
+              echo 'DirectoryIndex index.php index.html' >> docroot/.htaccess
+            fi
+            if ! grep -q 'CacheDisable' docroot/.htaccess 2>/dev/null; then
+              cat >> docroot/.htaccess <<'EOF'
+                <IfModule LiteSpeed>
+                    CacheDisable public /
+                    CacheDisable private /
+                </IfModule>
+                EOF
+            fi
+
+            # try assets (won't matter since we uploaded them; ignore failures)
             $PHP bin/console mautic:assets:generate --env=prod || true
 
-            # Run migrations only if DB creds exist; always clear cache
+            # migrations only if DB creds exist
             if $PHP -r '
               $f="config/local.php"; if(!file_exists($f)) exit(1);
               $ret = include $f;
