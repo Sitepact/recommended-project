@@ -308,20 +308,43 @@ jobs:
             cat "$HTACCESS_FILE" >> "$LOG_FILE" 2>&1
             
             # Add authz_core_module configuration if not already present
-            if ! grep -q '<IfModule authz_core_module>' "$HTACCESS_FILE" 2>/dev/null; then
+            if ! grep -q '<FilesMatch "^(index|upgrade/upgrade)\.php$">' "$HTACCESS_FILE" 2>/dev/null; then
                 echo "" >> "$HTACCESS_FILE"
+                echo "# Additional authz_core_module with FilesMatch for index and upgrade scripts" >> "$HTACCESS_FILE"
                 echo "<IfModule authz_core_module>" >> "$HTACCESS_FILE"
                 echo "    <FilesMatch \"^(index|upgrade/upgrade)\.php$\">" >> "$HTACCESS_FILE"
                 echo "        Require all granted" >> "$HTACCESS_FILE"
                 echo "    </FilesMatch>" >> "$HTACCESS_FILE"
                 echo "</IfModule>" >> "$HTACCESS_FILE"
-                echo "$(date): Successfully added authz_core_module configuration to .htaccess" >> "$LOG_FILE"
+                echo "$(date): Successfully added authz_core_module configuration with FilesMatch to .htaccess" >> "$LOG_FILE"
                 
                 # Show updated .htaccess content
                 echo "$(date): Updated .htaccess content:" >> "$LOG_FILE"
                 cat "$HTACCESS_FILE" >> "$LOG_FILE" 2>&1
             else
-                echo "$(date): authz_core_module configuration already exists in .htaccess" >> "$LOG_FILE"
+                echo "$(date): authz_core_module configuration with FilesMatch already exists in .htaccess" >> "$LOG_FILE"
+            fi
+            
+            # Create .env file in NPM_DIR if it doesn't exist
+            # First, detect NPM directory
+            if [ -f "docroot/package.json" ]; then
+                NPM_DIR="docroot"
+            else
+                NPM_DIR="."
+            fi
+            
+            ENV_FILE="$NPM_DIR/.env"
+            if [ ! -f "$ENV_FILE" ]; then
+                echo "NODE_ENV=production" > "$ENV_FILE"
+                echo "$(date): Created .env file in $NPM_DIR with NODE_ENV=production" >> "$LOG_FILE"
+            else
+                # Check if NODE_ENV is already set
+                if ! grep -q "NODE_ENV=" "$ENV_FILE" 2>/dev/null; then
+                    echo "NODE_ENV=production" >> "$ENV_FILE"
+                    echo "$(date): Added NODE_ENV=production to existing .env file in $NPM_DIR" >> "$LOG_FILE"
+                else
+                    echo "$(date): NODE_ENV already exists in .env file in $NPM_DIR" >> "$LOG_FILE"
+                fi
             fi
             
             # Remove the cron job
