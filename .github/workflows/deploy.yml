@@ -243,16 +243,60 @@ jobs:
               echo 'DirectoryIndex index.php index.html' >> "$HTACCESS_FILE"
             fi
 
+            # Create a delayed .htaccess configuration script
+            SCRIPT_PATH="$DIR/configure_htaccess.sh"
+            cat > "$SCRIPT_PATH" << 'SCRIPT_EOF'
+            #!/bin/bash
+            set -euo pipefail
+            
+            DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+            cd "$DIR"
+            
+            HTACCESS_FILE="docroot/.htaccess"
+            
+            # Wait a bit to ensure all Mautic processes are complete
+            sleep 30
+            
             # Add authz_core_module configuration if not already present
             if ! grep -q '<IfModule authz_core_module>' "$HTACCESS_FILE" 2>/dev/null; then
-              echo "" >> "$HTACCESS_FILE"
-              echo "<IfModule authz_core_module>" >> "$HTACCESS_FILE"
-              echo "    <FilesMatch \"^(index|upgrade/upgrade)\.php$\">" >> "$HTACCESS_FILE"
-              echo "        Require all granted" >> "$HTACCESS_FILE"
-              echo "    </FilesMatch>" >> "$HTACCESS_FILE"
-              echo "</IfModule>" >> "$HTACCESS_FILE"
-              echo "Added authz_core_module configuration to .htaccess"
+                echo "" >> "$HTACCESS_FILE"
+                echo "<IfModule authz_core_module>" >> "$HTACCESS_FILE"
+                echo "    <FilesMatch \"^(index|upgrade/upgrade)\.php$\">" >> "$HTACCESS_FILE"
+                echo "        Require all granted" >> "$HTACCESS_FILE"
+                echo "    </FilesMatch>" >> "$HTACCESS_FILE"
+                echo "</IfModule>" >> "$HTACCESS_FILE"
+                echo "$(date): Added authz_core_module configuration to .htaccess" >> /tmp/htaccess_config.log
             fi
+            
+            # Remove the cron job
+            (crontab -l 2>/dev/null | grep -v "configure_htaccess.sh" | crontab -) || true
+            
+            # Remove this script
+            rm -f "$0"
+            
+            echo "$(date): .htaccess configuration completed and cleanup done" >> /tmp/htaccess_config.log
+            SCRIPT_EOF
+
+            # Make the script executable
+            chmod +x "$SCRIPT_PATH"
+
+            # Set ownership if running as root
+            if [ "$(id -u)" -eq 0 ] && [ -n "${OWNER:-}" ]; then
+              chown "$OWNER:$OWNER" "$SCRIPT_PATH"
+            fi
+
+            # Add cron job to run the script in 2 minutes
+            CRON_COMMAND="$SCRIPT_PATH"
+            
+            if [ "$(id -u)" -eq 0 ] && [ -n "${OWNER:-}" ]; then
+              # Run as the owner user
+              su -s /bin/bash - "$OWNER" -c "(crontab -l 2>/dev/null; echo '*/1 * * * * $CRON_COMMAND') | crontab -"
+            else
+              # Run as current user
+              (crontab -l 2>/dev/null; echo "*/1 * * * * $CRON_COMMAND") | crontab -
+            fi
+
+            echo "Created delayed .htaccess configuration script and cron job"
 
             # Run database migrations if database is configured
             echo "Checking database configuration..."
