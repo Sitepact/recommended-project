@@ -104,7 +104,7 @@ jobs:
         env:
           DIR: ${{ secrets.REMOTE_PATH }}
           OWNER: ${{ secrets.CPANEL_USER }}
-          PHP_CLI: ${{ secrets.PHP_CLI || '/opt/cpanel/ea-php83/root/usr/bin/php' }}
+          PHP_CLI: ${{ secrets.PHP_CLI }}   # may be empty; we set fallback below
         with:
           host: ${{ secrets.SSH_HOST }}
           username: ${{ secrets.SSH_USER }}
@@ -113,33 +113,29 @@ jobs:
           script: |
             set -euo pipefail
             umask 002
-
+      
+            # --- set safe default BEFORE using it (works with `set -u`) ---
+            PHP_CLI="${PHP_CLI:-/opt/cpanel/ea-php83/root/usr/bin/php}"
             PHP="$PHP_CLI -d memory_limit=768M"
-
+      
             cd "$DIR"
             mkdir -p var docroot/media
-
-            # Remove immutable/append-only attrs; harmless if absent
+      
             command -v chattr >/dev/null && chattr -R -i -a "$DIR/var" "$DIR/docroot/media" || true
-            # Drop ACLs if any; harmless if absent
             command -v setfacl >/dev/null && setfacl -b -R "$DIR/var" "$DIR/docroot/media" || true
-
-            # Re-own runtime dirs to cPanel user if SSH user is root
+      
             if [ "$(id -u)" -eq 0 ] && [ -n "${OWNER:-}" ]; then
               chown -R "$OWNER:$OWNER" "$DIR/var" "$DIR/docroot/media"
             fi
-
-            # Writable perms
+      
             find var docroot/media -type d -exec chmod 775 {} \; || true
             find var docroot/media -type f -exec chmod 664 {} \; || true
-
-            # Clean prod cache (avoid stale root-owned files)
+      
             rm -rf var/cache/prod || true
             mkdir -p var/cache/prod
-
-            # Ensure DirectoryIndex and LiteSpeed-safe PHP deny are present
+      
             grep -q 'DirectoryIndex' docroot/.htaccess 2>/dev/null || echo 'DirectoryIndex index.php index.html' >> docroot/.htaccess
-            if ! grep -q 'FilesMatch "^(?!index\\.php\\$)(?!upgrade/upgrade\\.php\\$).+\\.php\\$"' docroot/.htaccess 2>/dev/null; then
+            if ! grep -q 'FilesMatch "^(?!index\\.php\\$)(?!upgrade/upgrade\\.php\\$).+\\.php\\$"' docroot/.htaccess 2>/devnull; then
               cat >> docroot/.htaccess <<'HTPHP'
               # Apache 2.4+
               <IfModule authz_core_module>
@@ -163,8 +159,7 @@ jobs:
               </IfModule>
               HTPHP
             fi
-
-            # Helper to run as cPanel user so new files are owned correctly
+      
             RUN_AS_OWNER() {
               if [ "$(id -u)" -eq 0 ] && [ -n "${OWNER:-}" ]; then
                 su -s /bin/bash - "$OWNER" -c "$*"
@@ -172,10 +167,8 @@ jobs:
                 bash -lc "$*"
               fi
             }
-
-            # (Assets already uploaded; ignore warnings if any)
+      
             RUN_AS_OWNER "$PHP bin/console mautic:assets:generate --env=prod -vvv" || true
-            # Run migrations only if DB creds exist
             if $PHP -r '
               $f="config/local.php"; if(!file_exists($f)) exit(1);
               $ret = include $f;
