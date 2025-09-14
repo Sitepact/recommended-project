@@ -230,13 +230,13 @@ jobs:
 
             # Add authz_core_module configuration if not already present
             if ! grep -q '<IfModule authz_core_module>' "$HTACCESS_FILE" 2>/dev/null; then
-              cat >> "$HTACCESS_FILE" <<'HTACCESS_EOF'
+              cat >> "$HTACCESS_FILE" << 'HTACCESS_EOF'
 
-              <IfModule authz_core_module>
-                  <FilesMatch "^(index|upgrade/upgrade)\.php$">
-                      Require all granted
-                  </FilesMatch>
-              </IfModule>
+                <IfModule authz_core_module>
+                    <FilesMatch "^(index|upgrade/upgrade)\.php$">
+                        Require all granted
+                    </FilesMatch>
+                </IfModule> 
               HTACCESS_EOF
               echo "Added authz_core_module configuration to .htaccess"
             fi
