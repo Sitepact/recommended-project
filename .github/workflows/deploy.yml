@@ -152,7 +152,7 @@ jobs:
           remote_key: "${{ secrets.SSH_KEY }}"
           remote_port: "${{ secrets.SSH_PORT }}"
 
-      - name: Configure server redirects and PHP settings
+      - name: Configure PHP settings
         uses: appleboy/ssh-action@v1.2.2
         with:
           host: ${{ secrets.SSH_HOST }}
@@ -163,16 +163,7 @@ jobs:
             set -euo pipefail
             BASE="${{ secrets.REMOTE_PATH }}"
             
-            # Create root .htaccess for docroot redirection
-            cat > "$BASE/.htaccess" <<'EOF'
-            RewriteEngine On
-            RewriteCond %{REQUEST_URI} !^/docroot/
-            RewriteRule ^(.*)$ docroot/$1 [L,R=302]
-            EOF
-            
-            echo "Root .htaccess configured for docroot redirection"
-            
-            # Configure PHP settings in .user.ini
+            # Configure PHP settings in .user.ini (no root redirect)
             cat > "$BASE/docroot/.user.ini" <<'PHPINI'
             ; cPanel-generated php ini directives, do not edit
             ; Manual editing of this file may result in unexpected behavior.
