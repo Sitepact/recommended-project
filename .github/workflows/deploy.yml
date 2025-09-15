@@ -149,7 +149,10 @@ jobs:
       - name: Deploy media assets
         uses: burnett01/rsync-deployments@7.0.1
         with:
-          switches: "-avz --no-perms --no-owner --no-group --ignore-existing"
+          witches: >-
+            -az --delete
+            --exclude='images/**' --exclude='files/**'
+            --filter='P images' --filter='P files'
           path: "artifact/docroot/media/"
           remote_path: "${{ secrets.REMOTE_PATH }}/docroot/media/"
           remote_host: "${{ secrets.SSH_HOST }}"
